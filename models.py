@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-import random
+import probmask
 
 class create_classifier(nn.Module):
  
@@ -62,7 +62,7 @@ class multiTimeAttention(nn.Module):
         return torch.sum(p_attn*value.unsqueeze(-3), -2), p_attn
     
     
-    def forward(self, query, key, value, mask=None, dropout=None):
+    def forward(self, query, key, value, mask=None, dropout=None, mode = False):
         "Compute 'Scaled Dot Product Attention'"
         batch, seq_len, dim = value.size()
         if mask is not None:
@@ -77,6 +77,8 @@ class multiTimeAttention(nn.Module):
         x, _ = self.attention(query, key, value, mask, dropout)
         x = x.transpose(1, 2).contiguous() \
              .view(batch, -1, self.h * dim)
+        if mode:
+            return x
         # 50 x 128 x 82
         return self.linears[-1](x)
     
@@ -132,30 +134,13 @@ class enc_mtan_rnn(nn.Module):
             key = self.fixed_time_embedding(time_steps).to(self.device)
             query = self.fixed_time_embedding(self.query.unsqueeze(0)).to(self.device)
         
-        # x_aug = self.att(query, query, x, mask)
-        value = x
-        batch, seq_len, dim = value.size()
-        if mask is not None:
-            # Same mask applied to all h heads.
-            # mask : 50 x 203 x 82 => [50, 1, 203, 82]
-            mask = mask.unsqueeze(1)
-        value = value.unsqueeze(1)
-        # query : 1 x 1 x 128 x 128, key: 50 x 1 x 203 x embed_time(128)
-        query1, key1 = [l(x).view(x.size(0), -1, self.att.h, self.att.embed_time_k).transpose(1, 2)
-                      for l, x in zip(self.att.linears, (key, key))]
-        # print(f"query : {query.shape}, key : {key.shape}")
-        x, _ = self.att.attention(query1, key1, value, mask)
-        x = x.transpose(1, 2).contiguous() \
-             .view(batch, -1, self.att.h * dim)
+        x_aug = self.att(key, key, x, mask, None, mode = True )
+        mask = mask[:, :, :self.dim]
         
-        # if random.randn(1)<0.1:
-        print(f"value : {value[0, :, :self.dim]}")
-        print(f"mask : {value[0, :, self.dim:]}")
-        
-        print(f"x : {x.shape, x[0, :, :self.dim]}")
-        print(f"new mask : {x[0, :, self.dim:]}")
-             
-        out = self.att(query, key, x, mask)
+        nmask = probmask.probabilistic_mask_update(mask, 11, 5, 10, 0.4)
+        nmask = torch.cat((nmask, nmask), 2)
+        out = self.att(query, key, x_aug, nmask)
+        # out = self.att(query, key, x, mask)
         out, _ = self.gru_rnn(out)
         out = self.hiddens_to_z0(out)
         return out
